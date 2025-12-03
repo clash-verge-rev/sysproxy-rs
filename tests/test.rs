@@ -30,7 +30,7 @@ mod tests {
         let mut sysproxy = Sysproxy {
             enable: true,
             host: "127.0.0.1".into(),
-            port: 9090,
+            port: 7897,
             #[cfg(target_os = "windows")]
             bypass: "localhost;127.*".into(),
             #[cfg(not(target_os = "windows"))]
@@ -54,7 +54,7 @@ mod tests {
     fn test_auto_enable() {
         let mut autoproxy = Autoproxy {
             enable: true,
-            url: "http://127.0.0.1:1234/".into(),
+            url: "http://127.0.0.1:33331/commands/pac".into(),
         };
         autoproxy.set_auto_proxy().unwrap();
 
