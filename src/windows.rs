@@ -51,7 +51,7 @@ fn unset_proxy() -> Result<()> {
 
     // 局域网 LAN 代理设置
     apply(&opts)?;
-    // 拨号连接/VPN 设置
+    // 拨号连接/VPN 代理设置
     let ras_conns = get_ras_connections()?;
     for ras_conn in ras_conns.iter() {
         opts.pszConnection = PWSTR::from_raw(encode_wide(ras_conn).as_ptr() as *mut u16);
@@ -97,7 +97,7 @@ fn set_auto_proxy(server: String) -> Result<()> {
 
     // 局域网 LAN 代理设置
     apply(&opts)?;
-    // 拨号连接/VPN 设置
+    // 拨号连接/VPN 代理设置
     let ras_conns = get_ras_connections()?;
     for ras_conn in ras_conns.iter() {
         opts.pszConnection = PWSTR::from_raw(encode_wide(ras_conn).as_ptr() as *mut u16);
@@ -151,7 +151,7 @@ fn set_global_proxy(server: String, bypass: String) -> Result<()> {
     };
     // 局域网 LAN 代理设置
     apply(&opts)?;
-    // 拨号连接/VPN 设置
+    // 拨号连接/VPN 代理设置
     let ras_conns = get_ras_connections()?;
     for ras_conn in ras_conns.iter() {
         opts.pszConnection = PWSTR::from_raw(encode_wide(ras_conn).as_ptr() as *mut u16);
@@ -288,7 +288,7 @@ fn parse_proxy_address(address: &str, host: &mut String, port: &mut u16) {
 
 /// refer: https://learn.microsoft.com/zh-cn/windows/win32/api/ras/nf-ras-rasenumentriesw
 ///
-/// 获取拨号连接和 VPN 连接
+/// 获取所有远程访问服务 （包含拨号连接和 VPN 连接）
 fn get_ras_connections() -> Result<Vec<String>> {
     println!("start get RAS connections...");
     let mut connections = Vec::new();
@@ -318,7 +318,7 @@ fn get_ras_connections() -> Result<Vec<String>> {
             // The first RASENTRYNAME structure in the array must contain the structure size
             (*lp_ras_entry_name).dwSize = std::mem::size_of::<RASENTRYNAMEW>() as u32;
 
-            // 获取拨号连接列表
+            // 获取所有 RAS 列表
             let result_code = RasEnumEntriesW(
                 PCWSTR::null(),
                 PCWSTR::null(),
