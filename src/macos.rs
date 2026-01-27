@@ -382,7 +382,14 @@ fn get_service_by_default_route() -> Result<String> {
 
 #[inline]
 fn get_service_by_active_connection() -> Result<String> {
-    let services = ["Wi-Fi", "Ethernet", "USB 10/100/1000 LAN"];
+    // 动态获取网络服务
+    let stdout = run_networksetup(&["-listallnetworkservices"])?;
+
+    let services: Vec<&str> = stdout
+        .split('\n')
+        .skip(1) // 跳过提示行
+        .filter(|s| !s.trim().is_empty() && !s.trim().starts_with('*')) // 过滤空行和禁用的服务
+        .collect();
 
     for service in services {
         // 检查服务是否存在且有活跃连接
@@ -493,5 +500,51 @@ fn test_set_bypass() {
     if let Err(e) = result {
         assert!(matches!(e, Error::RequiresAdminPrivileges));
         assert!(!Sysproxy::has_permission());
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[test]
+fn test_active_connection() {
+    println!("Testing get_service_by_active_connection()...");
+    match get_service_by_active_connection() {
+        Ok(service) => {
+            println!("✓ Found active service: '{}'", service);
+            println!("  Service name length: {} bytes", service.len());
+            println!("  Service name (debug): {:?}", service);
+        }
+        Err(e) => {
+            println!("✗ Failed to get active service: {:?}", e);
+        }
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[test]
+fn test_all_service_detection_methods() {
+    println!("\n=== Testing All Service Detection Methods ===\n");
+
+    println!("1. Testing get_service_by_default_route():");
+    match get_service_by_default_route() {
+        Ok(service) => println!("   ✓ Found: '{}' (len: {})", service, service.len()),
+        Err(e) => println!("   ✗ Failed: {:?}", e),
+    }
+
+    println!("\n2. Testing get_service_by_active_connection():");
+    match get_service_by_active_connection() {
+        Ok(service) => println!("   ✓ Found: '{}' (len: {})", service, service.len()),
+        Err(e) => println!("   ✗ Failed: {:?}", e),
+    }
+
+    println!("\n3. Testing default_network_service_by_ns():");
+    match default_network_service_by_ns() {
+        Ok(service) => println!("   ✓ Found: '{}' (len: {})", service, service.len()),
+        Err(e) => println!("   ✗ Failed: {:?}", e),
+    }
+
+    println!("\n4. Testing default_network_service() (combined):");
+    match default_network_service() {
+        Ok(service) => println!("   ✓ Found: '{}' (len: {})", service, service.len()),
+        Err(e) => println!("   ✗ Failed: {:?}", e),
     }
 }
