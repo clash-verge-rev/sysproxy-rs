@@ -1,6 +1,6 @@
 [package]
 name = "sysproxy"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 authors = ["zzzgydi"]
 license = "MIT"
@@ -23,9 +23,6 @@ tokio = { version = "1", features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 xdg = "3.0.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-interfaces = "0.0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = { version = "0.55.0", features = ["transactions"] }
