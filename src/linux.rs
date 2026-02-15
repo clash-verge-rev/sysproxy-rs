@@ -491,7 +491,9 @@ fn parse_url_candidate(schema: &str) -> Option<(String, u16)> {
 fn parse_kde_proxy_schema(schema: &str, service: &str) -> Result<(String, u16)> {
     let schema = schema.trim();
     if schema.is_empty() {
-        return Err(Error::ParseStr("schema".into()));
+        // KDE's default kioslaverc may not contain per-scheme proxy entries at all.
+        // Treat an empty value as "not configured" instead of a hard error.
+        return Ok(("".into(), 0));
     }
 
     let scheme = match service {
@@ -582,8 +584,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_schema_returns_error() {
-        assert!(parse_kde_proxy_schema("", "http").is_err());
+    fn empty_schema_returns_empty_result() {
+        let (host, port) = parse_kde_proxy_schema("", "http").unwrap();
+        assert_eq!(host, "");
+        assert_eq!(port, 0);
     }
 }
 
