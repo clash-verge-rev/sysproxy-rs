@@ -261,13 +261,17 @@ fn run_networksetup<'a>(args: &[&str]) -> Result<Cow<'a, str>> {
 
     let stdout = from_utf8(&output.stdout).map_err(|_| Error::ParseStr("output".into()))?;
 
-    if !output.status.success() && stdout.contains("requires admin privileges") {
-        log::error!(
-            "Admin privileges required to run networksetup with args: {:?}, error: {}",
-            args,
-            stdout
-        );
-        return Err(Error::RequiresAdminPrivileges);
+    if !output.status.success() {
+        if stdout.contains("requires admin privileges") {
+            log::error!(
+                "Admin privileges required to run networksetup with args: {:?}, error: {}",
+                args,
+                stdout
+            );
+            return Err(Error::RequiresAdminPrivileges);
+        }
+        log::error!("networksetup failed with args: {:?}, output: {}", args, stdout);
+        return Err(Error::ParseStr(format!("networksetup failed: {}", stdout.trim())));
     }
 
     Ok(Cow::Owned(stdout.to_string()))
@@ -302,19 +306,28 @@ fn set_bypass(proxy: &Sysproxy, service: &str) -> Result<()> {
 }
 
 fn get_active_network_service() -> Result<CFString> {
+    // `networksetup` identifies a connection by its *service* name (the
+    // user-visible name in Network preferences, e.g. "Wi-Fi" or "internet1"),
+    // not by the interface/hardware-port display name. They only coincide by
+    // luck (Wi-Fi), so a wired service named differently from its port (USB
+    // ethernet, renamed services) would be addressed by the wrong identifier.
+    // The service name is the `UserDefinedName` stored under the service's
+    // dynamic-store entry.
     let service_uuid = get_active_network_service_uuid()?;
-    let scp = SCPreferences::default(&CFString::new("sysproxy-rs"));
-    let services = SCNetworkService::get_services(&scp);
-    for service in &services {
-        if let Some(uuid) = service.id()
-            && uuid == service_uuid
-            && let Some(interface) = service.network_interface()
-            && let Some(name) = interface.display_name()
-        {
-            return Ok(name);
-        }
-    }
-    Err(Error::NetworkInterface)
+    let store = SCDynamicStoreBuilder::new("sysproxy-rs")
+        .build()
+        .ok_or(Error::SCDynamicStore)?;
+    let key = CFString::new(&format!("Setup:/Network/Service/{service_uuid}"));
+    let dict = store
+        .get(key)
+        .and_then(|v| v.downcast_into::<CFDictionary>())
+        .ok_or(Error::NetworkInterface)?;
+    let name_key = CFString::from_static_string("UserDefinedName");
+    let val_ptr = dict
+        .find(name_key.as_CFTypeRef() as *const _)
+        .ok_or(Error::NetworkInterface)?;
+    let name = unsafe { CFString::wrap_under_get_rule(*val_ptr as _) };
+    Ok(name)
 }
 
 fn get_active_network_service_uuid() -> Result<CFString> {
@@ -522,6 +535,36 @@ fn test_get_service_id_by_display_name() {
     let proxies = get_proxies_by_service_uuid(&scp, &service_uuid).unwrap();
     assert!(!proxies.is_empty());
     println!("proxies: {:?}", proxies);
+}
+
+#[test]
+fn active_service_name_is_recognized_by_networksetup() {
+    // Regression: get_active_network_service must return the *service* name
+    // that `networksetup` understands, not the interface display name. They
+    // differ for e.g. USB ethernet adapters or renamed services, which broke
+    // system-proxy toggling on wired connections.
+    let Ok(service) = get_active_network_service() else {
+        return; // no active network service in this environment
+    };
+    let service = service.to_string();
+
+    let Ok(output) = Command::new("networksetup")
+        .arg("-listallnetworkservices")
+        .output()
+    else {
+        return;
+    };
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let known = listing
+        .lines()
+        .skip(1) // first line is a human-readable header
+        .map(|l| l.trim_start_matches('*').trim())
+        .any(|name| name == service);
+
+    assert!(
+        known,
+        "active service {service:?} not recognized by networksetup:\n{listing}"
+    );
 }
 
 #[test]
