@@ -1,6 +1,8 @@
-//! Get/Set system proxy. Supports Windows, macOS and linux (via gsettings).
+//! Get/Set system proxy. Supports Windows, macOS, Linux and FreeBSD (via gsettings/KDE).
+//! On FreeBSD, the Linux implementation is reused (GNOME gsettings/dconf and KDE
+//! kreadconfig/kwriteconfig), since FreeBSD desktops ship the same tooling.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -59,7 +61,7 @@ pub enum Error {
     #[error("networksetup failed: {0}")]
     NetworkSetup(String),
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[error(transparent)]
     Xdg(#[from] xdg::BaseDirectoriesError),
 
@@ -74,6 +76,7 @@ impl Sysproxy {
     pub const fn is_support() -> bool {
         cfg!(any(
             target_os = "linux",
+            target_os = "freebsd",
             target_os = "macos",
             target_os = "windows",
         ))
@@ -84,6 +87,7 @@ impl Autoproxy {
     pub const fn is_support() -> bool {
         cfg!(any(
             target_os = "linux",
+            target_os = "freebsd",
             target_os = "macos",
             target_os = "windows",
         ))

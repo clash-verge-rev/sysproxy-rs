@@ -23,7 +23,7 @@ tokio = { version = "1", features = [
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 url = "2.5"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 xdg = "3.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -44,10 +44,6 @@ criterion = "0.7"
 
 [[bench]]
 name = "macos_behavior"
-harness = false
-
-[[bench]]
-name = "windows_behavior"
 harness = false
 
 [features]
