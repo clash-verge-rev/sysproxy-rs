@@ -826,6 +826,7 @@ pub fn get_proxies_dict_from_service_uuid(
 }
 
 #[test]
+#[ignore = "machine-dependent: requires a real network service named Wi-Fi"]
 #[allow(clippy::unwrap_used)]
 fn test_get_service_id_by_display_name() {
     let scp = SCPreferences::default(&CFString::new("sysproxy-rs"));
