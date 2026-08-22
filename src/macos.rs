@@ -1,11 +1,7 @@
-#[cfg(feature = "privileged-macos")]
-use crate::ProxyConfig;
 use crate::{Autoproxy, Error, ProxyEndpoint, ProxySnapshot, Result, Sysproxy, WriteProgress};
 use log::debug;
 use std::process::{Command, Output, Stdio};
-#[cfg(feature = "privileged-macos")]
 use system_configuration::core_foundation::dictionary::CFMutableDictionary;
-#[cfg(feature = "privileged-macos")]
 use system_configuration::sys::{
     network_configuration::{SCNetworkProtocolRef, SCNetworkProtocolSetConfiguration},
     preferences::{SCPreferencesApplyChanges, SCPreferencesCommitChanges},
@@ -309,7 +305,6 @@ impl Autoproxy {
     }
 }
 
-#[cfg(feature = "privileged-macos")]
 struct NativeProxyWriter {
     preferences: SCPreferences,
     protocol: SCNetworkProtocolRef,
@@ -317,15 +312,13 @@ struct NativeProxyWriter {
     locked: bool,
 }
 
-#[cfg(feature = "privileged-macos")]
 impl NativeProxyWriter {
     fn open() -> Result<Self> {
         let service_id = get_active_network_service_uuid()?;
         let preferences = SCPreferences::default(&CFString::new("sysproxy-rs privileged native"));
 
         // A privileged service must not wait indefinitely behind another preferences writer.
-        let locked = unsafe { SCPreferencesLock(preferences.as_concrete_TypeRef(), 0) } != 0;
-        if !locked {
+        if unsafe { SCPreferencesLock(preferences.as_concrete_TypeRef(), 0) } == 0 {
             return Err(Error::SystemConfiguration("lock preferences"));
         }
 
@@ -409,12 +402,6 @@ impl NativeProxyWriter {
         self.set_number("ProxyAutoConfigEnable", i32::from(enable));
     }
 
-    fn stage(&mut self, config: &ProxyConfig) {
-        let (system, auto) = config.components();
-        self.set_global(&system.host, system.port, &system.bypass, system.enable);
-        self.set_pac(&auto.url, auto.enable);
-    }
-
     fn commit(mut self) -> Result<()> {
         let config = self.config.to_immutable();
         if unsafe { SCNetworkProtocolSetConfiguration(self.protocol, config.as_concrete_TypeRef()) }
@@ -446,7 +433,6 @@ impl NativeProxyWriter {
     }
 }
 
-#[cfg(feature = "privileged-macos")]
 impl Drop for NativeProxyWriter {
     fn drop(&mut self) {
         if self.locked {
@@ -458,10 +444,10 @@ impl Drop for NativeProxyWriter {
     }
 }
 
-#[cfg(feature = "privileged-macos")]
-pub(crate) fn apply_privileged_native(config: &ProxyConfig) -> Result<()> {
+pub(crate) fn apply_privileged_native(system: &Sysproxy, auto: &Autoproxy) -> Result<()> {
     let mut writer = NativeProxyWriter::open()?;
-    writer.stage(config);
+    writer.set_global(&system.host, system.port, &system.bypass, system.enable);
+    writer.set_pac(&auto.url, auto.enable);
     writer.commit()
 }
 
@@ -826,7 +812,6 @@ pub fn get_proxies_dict_from_service_uuid(
 }
 
 #[test]
-#[ignore = "machine-dependent: requires a real network service named Wi-Fi"]
 #[allow(clippy::unwrap_used)]
 fn test_get_service_id_by_display_name() {
     let scp = SCPreferences::default(&CFString::new("sysproxy-rs"));
