@@ -1,6 +1,15 @@
+#[cfg(feature = "privileged-macos")]
+use crate::ProxyConfig;
 use crate::{Autoproxy, Error, ProxyEndpoint, ProxySnapshot, Result, Sysproxy, WriteProgress};
 use log::debug;
 use std::process::{Command, Output, Stdio};
+#[cfg(feature = "privileged-macos")]
+use system_configuration::core_foundation::dictionary::CFMutableDictionary;
+#[cfg(feature = "privileged-macos")]
+use system_configuration::sys::{
+    network_configuration::{SCNetworkProtocolRef, SCNetworkProtocolSetConfiguration},
+    preferences::{SCPreferencesApplyChanges, SCPreferencesCommitChanges},
+};
 use system_configuration::{core_foundation::dictionary::CFDictionary, preferences::SCPreferences};
 use system_configuration::{
     core_foundation::{array::CFArray, base::TCFType},
@@ -298,6 +307,162 @@ impl Autoproxy {
 
         Ok(())
     }
+}
+
+#[cfg(feature = "privileged-macos")]
+struct NativeProxyWriter {
+    preferences: SCPreferences,
+    protocol: SCNetworkProtocolRef,
+    config: CFMutableDictionary<CFString, CFType>,
+    locked: bool,
+}
+
+#[cfg(feature = "privileged-macos")]
+impl NativeProxyWriter {
+    fn open() -> Result<Self> {
+        let service_id = get_active_network_service_uuid()?;
+        let preferences = SCPreferences::default(&CFString::new("sysproxy-rs privileged native"));
+
+        // A privileged service must not wait indefinitely behind another preferences writer.
+        let locked = unsafe { SCPreferencesLock(preferences.as_concrete_TypeRef(), 0) } != 0;
+        if !locked {
+            return Err(Error::SystemConfiguration("lock preferences"));
+        }
+
+        unsafe {
+            let service = SCNetworkServiceCopy(
+                preferences.as_concrete_TypeRef(),
+                service_id.as_concrete_TypeRef(),
+            );
+            if service.is_null() {
+                SCPreferencesUnlock(preferences.as_concrete_TypeRef());
+                return Err(Error::SystemConfiguration("resolve active network service"));
+            }
+
+            let protocol = SCNetworkServiceCopyProtocol(
+                service,
+                CFString::from_static_string("Proxies").as_concrete_TypeRef(),
+            );
+            CFRelease(service.cast());
+            if protocol.is_null() {
+                SCPreferencesUnlock(preferences.as_concrete_TypeRef());
+                return Err(Error::SystemConfiguration("resolve proxy protocol"));
+            }
+
+            let current = SCNetworkProtocolGetConfiguration(protocol);
+            let config = if current.is_null() {
+                CFMutableDictionary::new()
+            } else {
+                let current = CFDictionary::<CFString, CFType>::wrap_under_get_rule(current);
+                CFMutableDictionary::from(&current)
+            };
+
+            Ok(Self {
+                preferences,
+                protocol,
+                config,
+                locked: true,
+            })
+        }
+    }
+
+    fn set_number(&mut self, key: &'static str, value: i32) {
+        self.config.set(
+            CFString::from_static_string(key),
+            CFNumber::from(value).as_CFType(),
+        );
+    }
+
+    fn set_string(&mut self, key: &'static str, value: &str) {
+        self.config.set(
+            CFString::from_static_string(key),
+            CFString::new(value).as_CFType(),
+        );
+    }
+
+    fn set_global(&mut self, host: &str, port: u16, bypass: &str, enable: bool) {
+        const PROXY_KEYS: [(&str, &str, &str); 3] = [
+            ("HTTPProxy", "HTTPPort", "HTTPEnable"),
+            ("HTTPSProxy", "HTTPSPort", "HTTPSEnable"),
+            ("SOCKSProxy", "SOCKSPort", "SOCKSEnable"),
+        ];
+
+        for (host_key, port_key, enable_key) in PROXY_KEYS {
+            self.set_string(host_key, host);
+            self.set_number(port_key, i32::from(port));
+            self.set_number(enable_key, i32::from(enable));
+        }
+
+        let bypass = if bypass.is_empty() {
+            Vec::new()
+        } else {
+            bypass.split(',').map(CFString::new).collect()
+        };
+        self.config.set(
+            CFString::from_static_string("ExceptionsList"),
+            CFArray::from_CFTypes(&bypass).as_CFType(),
+        );
+    }
+
+    fn set_pac(&mut self, url: &str, enable: bool) {
+        self.set_string("ProxyAutoConfigURLString", url);
+        self.set_number("ProxyAutoConfigEnable", i32::from(enable));
+    }
+
+    fn stage(&mut self, config: &ProxyConfig) {
+        let (system, auto) = config.components();
+        self.set_global(&system.host, system.port, &system.bypass, system.enable);
+        self.set_pac(&auto.url, auto.enable);
+    }
+
+    fn commit(mut self) -> Result<()> {
+        let config = self.config.to_immutable();
+        if unsafe { SCNetworkProtocolSetConfiguration(self.protocol, config.as_concrete_TypeRef()) }
+            == 0
+        {
+            return Err(Error::SystemConfiguration("stage proxy configuration"));
+        }
+        if unsafe { SCPreferencesCommitChanges(self.preferences.as_concrete_TypeRef()) } == 0 {
+            return Err(Error::SystemConfiguration("commit proxy configuration"));
+        }
+        if unsafe { SCPreferencesApplyChanges(self.preferences.as_concrete_TypeRef()) } == 0 {
+            return Err(Error::SystemConfiguration("apply proxy configuration"));
+        }
+        if !self.unlock() {
+            return Err(Error::SystemConfiguration("unlock preferences"));
+        }
+        Ok(())
+    }
+
+    fn unlock(&mut self) -> bool {
+        if !self.locked {
+            return true;
+        }
+        let unlocked = unsafe { SCPreferencesUnlock(self.preferences.as_concrete_TypeRef()) != 0 };
+        if unlocked {
+            self.locked = false;
+        }
+        unlocked
+    }
+}
+
+#[cfg(feature = "privileged-macos")]
+impl Drop for NativeProxyWriter {
+    fn drop(&mut self) {
+        if self.locked {
+            self.unlock();
+        }
+        unsafe {
+            CFRelease(self.protocol.cast());
+        }
+    }
+}
+
+#[cfg(feature = "privileged-macos")]
+pub(crate) fn apply_privileged_native(config: &ProxyConfig) -> Result<()> {
+    let mut writer = NativeProxyWriter::open()?;
+    writer.stage(config);
+    writer.commit()
 }
 
 /// Fixed path prevents `PATH` substitution in privileged callers.
