@@ -1,6 +1,6 @@
 [package]
 name = "sysproxy"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 authors = ["zzzgydi"]
 license = "MIT"
@@ -21,18 +21,18 @@ tokio = { version = "1", features = [
 ], optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-url = "2.5"
+url = { version = "2.5", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-xdg = "3.0"
-which = "8.0.5"
+xdg = { version = "3.0", optional = true }
+which = { version = "8.0.5", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-system-configuration = "0.7"
+system-configuration = { version = "0.7", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winreg = { version = "0.55", features = ["transactions"] }
-windows = { version = "0.62", features = [
+winreg = { version = "0.55", features = ["transactions"], optional = true }
+windows = { version = "0.62", optional = true, features = [
     "Win32_Networking_WinInet",
     "Win32_NetworkManagement_Rras",
     "Win32_Foundation",
@@ -52,8 +52,13 @@ harness = false
 # harness = false
 
 [features]
-default = ["iptools"]
-guard = ["tokio"]
+default = ["iptools", "platform"]
+guard = ["tokio", "platform"]
+platform = ["linux", "macos", "windows"]
+linux = ["dep:url", "dep:which", "dep:xdg"]
+macos = ["dep:system-configuration"]
+windows = ["dep:url", "dep:windows", "dep:winreg"]
+privileged-macos = ["macos"]
 
 [lints.clippy]
 # Core categories - most important for code safety and correctness

@@ -1,13 +1,13 @@
 //! Get/Set system proxy. Supports Windows, macOS and linux (via gsettings).
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "linux"))]
 mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "macos"))]
 mod macos;
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "windows"))]
 mod windows;
 
-// #[cfg(feature = "utils")]
+#[cfg(feature = "iptools")]
 pub mod utils;
 
 #[cfg(feature = "guard")]
@@ -28,6 +28,91 @@ pub struct Sysproxy {
 pub struct Autoproxy {
     pub url: String,
     pub enable: bool,
+}
+
+/// One complete desired system-proxy state.
+///
+/// [`ProxyConfig::apply`] uses the platform's existing user-facing backend. On macOS that
+/// intentionally remains the signed `networksetup` tool so unprivileged applications keep the
+/// established authorization behavior. Privileged helpers can opt into the command-free,
+/// transactional `ProxyConfig::apply_privileged_native` path instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyConfig {
+    Disabled,
+    Global {
+        host: String,
+        port: u16,
+        bypass: String,
+    },
+    Pac {
+        url: String,
+    },
+}
+
+impl ProxyConfig {
+    #[cfg(any(
+        test,
+        all(target_os = "linux", feature = "linux"),
+        all(target_os = "macos", feature = "macos"),
+        all(target_os = "windows", feature = "windows"),
+    ))]
+    fn components(&self) -> (Sysproxy, Autoproxy) {
+        match self {
+            Self::Disabled => (Sysproxy::default(), Autoproxy::default()),
+            Self::Global { host, port, bypass } => (
+                Sysproxy {
+                    host: host.clone(),
+                    port: *port,
+                    bypass: bypass.clone(),
+                    enable: true,
+                },
+                Autoproxy::default(),
+            ),
+            Self::Pac { url } => (
+                Sysproxy::default(),
+                Autoproxy {
+                    url: url.clone(),
+                    enable: true,
+                },
+            ),
+        }
+    }
+
+    /// Apply the desired state through the platform's compatibility backend.
+    ///
+    /// This preserves the behavior of [`Sysproxy::set_system_proxy`] and
+    /// [`Autoproxy::set_auto_proxy`], including macOS authorization through `networksetup`.
+    #[cfg(any(
+        all(target_os = "linux", feature = "linux"),
+        all(target_os = "macos", feature = "macos"),
+        all(target_os = "windows", feature = "windows"),
+    ))]
+    pub fn apply(&self) -> Result<()> {
+        let (system, auto) = self.components();
+        match self {
+            Self::Disabled => {
+                system.set_system_proxy()?;
+                auto.set_auto_proxy()
+            }
+            Self::Global { .. } => {
+                auto.set_auto_proxy()?;
+                system.set_system_proxy()
+            }
+            Self::Pac { .. } => {
+                system.set_system_proxy()?;
+                auto.set_auto_proxy()
+            }
+        }
+    }
+
+    /// Apply the complete state in one native SystemConfiguration transaction.
+    ///
+    /// This path performs no authorization UI and must only be called by a process that already
+    /// has permission to write system network preferences, such as a privileged service.
+    #[cfg(all(target_os = "macos", feature = "privileged-macos"))]
+    pub fn apply_privileged_native(&self) -> Result<()> {
+        macos::apply_privileged_native(self)
+    }
 }
 
 /// Unflattened system proxy state, one entry per protocol.
@@ -190,6 +275,10 @@ pub enum Error {
     SCPreferences,
 
     #[cfg(target_os = "macos")]
+    #[error("SystemConfiguration operation failed: {0}")]
+    SystemConfiguration(&'static str),
+
+    #[cfg(target_os = "macos")]
     #[error("failed to interact with SCDynamicStore")]
     SCDynamicStore,
 
@@ -202,11 +291,11 @@ pub enum Error {
     #[error("networksetup failed: {0}")]
     NetworkSetup(String),
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "linux"))]
     #[error(transparent)]
     Xdg(#[from] xdg::BaseDirectoriesError),
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     #[error("Windows system call failed: {0}")]
     SystemCall(#[from] windows::Win32Error),
 
@@ -220,9 +309,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl Sysproxy {
     pub const fn is_support() -> bool {
         cfg!(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "windows",
+            all(target_os = "linux", feature = "linux"),
+            all(target_os = "macos", feature = "macos"),
+            all(target_os = "windows", feature = "windows"),
         ))
     }
 }
@@ -230,16 +319,16 @@ impl Sysproxy {
 impl Autoproxy {
     pub const fn is_support() -> bool {
         cfg!(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "windows",
+            all(target_os = "linux", feature = "linux"),
+            all(target_os = "macos", feature = "macos"),
+            all(target_os = "windows", feature = "windows"),
         ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Autoproxy, ProxyEndpoint, ProxySnapshot, Sysproxy};
+    use super::{Autoproxy, ProxyConfig, ProxyEndpoint, ProxySnapshot, Sysproxy};
 
     fn endpoint(port: u16, enable: bool) -> ProxyEndpoint {
         ProxyEndpoint {
@@ -288,6 +377,43 @@ mod tests {
             auto_switched_on: false,
             bypass: String::new(),
         }
+    }
+
+    #[test]
+    fn desired_states_map_to_mutually_exclusive_legacy_components() {
+        let (system, auto) = ProxyConfig::Disabled.components();
+        assert_eq!(system, Sysproxy::default());
+        assert_eq!(auto, Autoproxy::default());
+
+        let (system, auto) = ProxyConfig::Global {
+            host: "127.0.0.1".into(),
+            port: 7890,
+            bypass: "localhost".into(),
+        }
+        .components();
+        assert_eq!(
+            system,
+            Sysproxy {
+                host: "127.0.0.1".into(),
+                port: 7890,
+                bypass: "localhost".into(),
+                enable: true,
+            }
+        );
+        assert_eq!(auto, Autoproxy::default());
+
+        let (system, auto) = ProxyConfig::Pac {
+            url: "http://127.0.0.1:33221/proxy.pac".into(),
+        }
+        .components();
+        assert_eq!(system, Sysproxy::default());
+        assert_eq!(
+            auto,
+            Autoproxy {
+                url: "http://127.0.0.1:33221/proxy.pac".into(),
+                enable: true,
+            }
+        );
     }
 
     #[test]
