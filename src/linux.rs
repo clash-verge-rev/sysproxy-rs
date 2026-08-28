@@ -195,22 +195,16 @@ impl Sysproxy {
                     .bypass
                     .split(',')
                     .map(|h| {
-                        let mut host = String::from(h.trim());
-                        if !host.starts_with('\'') && !host.starts_with('"') {
-                            host = String::from("'") + &host;
-                        }
-                        if !host.ends_with('\'') && !host.ends_with('"') {
-                            host += "'";
-                        }
-                        host
+                        let quotes = &['\'', '"'];
+                        let host = h.trim().trim_start_matches(quotes).trim_end_matches(quotes);
+                        format!("'{}'", host)
                     })
                     .collect::<Vec<String>>()
                     .join(", ");
-
                 let bypass = format!("[{bypass}]");
+
                 try_run_gsettings(&["set", CMD_KEY, "ignore-hosts", bypass.as_str()]);
                 try_write_dconf("/system/proxy/ignore-hosts", bypass.as_str());
-
                 Ok(())
             }
             _ => {
@@ -218,18 +212,12 @@ impl Sysproxy {
                     .bypass
                     .split(',')
                     .map(|h| {
-                        let mut host = String::from(h.trim());
-                        if !host.starts_with('\'') && !host.starts_with('"') {
-                            host = String::from("'") + &host;
-                        }
-                        if !host.ends_with('\'') && !host.ends_with('"') {
-                            host += "'";
-                        }
-                        host
+                        let quoto = &['\'', '"'];
+                        let host = h.trim().trim_start_matches(quoto).trim_end_matches(quoto);
+                        format!("'{}'", host)
                     })
                     .collect::<Vec<String>>()
                     .join(", ");
-
                 let bypass = format!("[{bypass}]");
 
                 gsettings()?
