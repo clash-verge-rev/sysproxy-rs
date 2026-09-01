@@ -212,8 +212,8 @@ impl Sysproxy {
                     .bypass
                     .split(',')
                     .map(|h| {
-                        let quoto = &['\'', '"'];
-                        let host = h.trim().trim_start_matches(quoto).trim_end_matches(quoto);
+                        let quotes = &['\'', '"'];
+                        let host = h.trim().trim_start_matches(quotes).trim_end_matches(quotes);
                         format!("'{}'", host)
                     })
                     .collect::<Vec<String>>()
