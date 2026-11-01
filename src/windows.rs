@@ -47,7 +47,9 @@ fn encode_wide<S: AsRef<std::ffi::OsStr>>(string: S) -> Vec<u16> {
 /// **对于包含中文字符的拨号连接或 VPN 连接，可能无法正确设置其代理，建议使用全英文重命名该连接名称**
 #[inline]
 fn unset_proxy() -> Result<()> {
-    let mut p_opts = Vec::<INTERNET_PER_CONN_OPTIONW>::with_capacity(1);
+    // 空字符串会清空残留的 ProxyServer，避免应用直接读取注册表后仍走代理
+    let empty_server = encode_wide("");
+    let mut p_opts = Vec::<INTERNET_PER_CONN_OPTIONW>::with_capacity(2);
     p_opts.push(INTERNET_PER_CONN_OPTIONW {
         dwOption: INTERNET_PER_CONN_FLAGS,
         Value: {
@@ -56,9 +58,15 @@ fn unset_proxy() -> Result<()> {
             v
         },
     });
+    p_opts.push(INTERNET_PER_CONN_OPTIONW {
+        dwOption: INTERNET_PER_CONN_PROXY_SERVER,
+        Value: INTERNET_PER_CONN_OPTIONW_0 {
+            pszValue: PWSTR::from_raw(empty_server.as_ptr() as *mut u16),
+        },
+    });
     let mut opts = INTERNET_PER_CONN_OPTION_LISTW {
         dwSize: size_of::<INTERNET_PER_CONN_OPTION_LISTW>() as u32,
-        dwOptionCount: 1,
+        dwOptionCount: 2,
         dwOptionError: 0,
         pOptions: p_opts.as_mut_ptr(),
         pszConnection: PWSTR::null(),
