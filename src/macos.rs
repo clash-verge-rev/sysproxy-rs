@@ -148,11 +148,9 @@ impl Sysproxy {
                 host: parsed.host,
                 port: parsed.port,
                 enable: parsed.enable,
-                // Keep the raw switch before usability is folded in.
                 switched_on,
             })
         };
-
         Ok(ProxySnapshot {
             socks: endpoint(ProxyType::Socks)?,
             http: endpoint(ProxyType::Http)?,
@@ -321,6 +319,39 @@ impl Autoproxy {
     }
 }
 
+type ManagedProxyFields = Vec<Option<Vec<u8>>>;
+
+fn managed_proxy_fields(dict: &CFDictionary<CFString, CFType>) -> Result<ManagedProxyFields> {
+    use system_configuration::core_foundation::propertylist::{
+        create_data, kCFPropertyListBinaryFormat_v1_0,
+    };
+    const KEYS: [&str; 12] = [
+        "HTTPProxy",
+        "HTTPPort",
+        "HTTPEnable",
+        "HTTPSProxy",
+        "HTTPSPort",
+        "HTTPSEnable",
+        "SOCKSProxy",
+        "SOCKSPort",
+        "SOCKSEnable",
+        "ProxyAutoConfigURLString",
+        "ProxyAutoConfigEnable",
+        "ExceptionsList",
+    ];
+    KEYS.iter()
+        .map(|key| {
+            dict.find(CFString::from_static_string(key))
+                .map(|value| {
+                    create_data(value.as_CFTypeRef(), kCFPropertyListBinaryFormat_v1_0)
+                        .map(|data| data.bytes().to_vec())
+                        .map_err(|_| Error::SystemConfiguration("capture managed proxy field"))
+                })
+                .transpose()
+        })
+        .collect()
+}
+
 /// Bounded, because a privileged service must not wait indefinitely behind another writer.
 const PREFERENCES_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const PREFERENCES_LOCK_RETRY: Duration = Duration::from_millis(20);
@@ -351,20 +382,34 @@ struct NativeProxyWriter {
     protocol: SCNetworkProtocolRef,
     config: CFMutableDictionary<CFString, CFType>,
     locked: bool,
+    service_id: String,
 }
 
 impl NativeProxyWriter {
     fn open() -> Result<Self> {
-        let primary = read_primary_ipv4()?;
+        Self::open_service(None)
+    }
+
+    fn open_service(service_id: Option<&str>) -> Result<Self> {
+        let primary = if service_id.is_none() {
+            Some(read_primary_ipv4()?)
+        } else {
+            None
+        };
         let preferences = SCPreferences::default(&CFString::new("sysproxy-rs privileged native"));
         // Resolve only after locking: a session that read the preferences before locking fails
         // the lock as stale when they changed in between.
         lock_preferences(&preferences)?;
 
         unsafe {
-            let service = match resolve_active_service(&preferences, &primary)
-                .and_then(|service_id| copy_network_service(&preferences, &service_id))
-            {
+            let selected = match (service_id, primary.as_ref()) {
+                (Some(id), _) => Ok(CFString::new(id)),
+                (None, Some(primary)) => resolve_active_service(&preferences, primary),
+                (None, None) => Err(Error::NoActiveNetworkService),
+            };
+            let (service_id, service) = match selected.and_then(|id| {
+                copy_network_service(&preferences, &id).map(|service| (id.to_string(), service))
+            }) {
                 Ok(service) => service,
                 Err(error) => {
                     SCPreferencesUnlock(preferences.as_concrete_TypeRef());
@@ -395,6 +440,7 @@ impl NativeProxyWriter {
                 protocol,
                 config,
                 locked: true,
+                service_id,
             })
         }
     }
@@ -442,7 +488,14 @@ impl NativeProxyWriter {
         self.set_number("ProxyAutoConfigEnable", i32::from(enable));
     }
 
-    fn commit(mut self) -> Result<()> {
+    fn receipt(&self) -> Result<PrivilegedProxyReceipt> {
+        Ok(PrivilegedProxyReceipt {
+            service_id: self.service_id.clone(),
+            states: vec![managed_proxy_fields(&self.config.to_immutable())?],
+        })
+    }
+
+    fn commit(&mut self) -> Result<()> {
         let config = self.config.to_immutable();
         if unsafe { SCNetworkProtocolSetConfiguration(self.protocol, config.as_concrete_TypeRef()) }
             == 0
@@ -455,10 +508,15 @@ impl NativeProxyWriter {
         if unsafe { SCPreferencesApplyChanges(self.preferences.as_concrete_TypeRef()) } == 0 {
             return Err(Error::SystemConfiguration("apply proxy configuration"));
         }
-        if !self.unlock() {
-            return Err(Error::SystemConfiguration("unlock preferences"));
-        }
         Ok(())
+    }
+
+    fn finish(mut self) -> Result<()> {
+        if self.unlock() {
+            Ok(())
+        } else {
+            Err(Error::SystemConfiguration("unlock preferences"))
+        }
     }
 
     fn unlock(&mut self) -> bool {
@@ -488,7 +546,74 @@ pub(crate) fn apply_privileged_native(system: &Sysproxy, auto: &Autoproxy) -> Re
     let mut writer = NativeProxyWriter::open()?;
     writer.set_global(&system.host, system.port, &system.bypass, system.enable);
     writer.set_pac(&auto.url, auto.enable);
-    writer.commit()
+    writer.commit()?;
+    writer.finish()
+}
+
+/// Identifies the exact service and proxy fields written by one native operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegedProxyReceipt {
+    service_id: String,
+    states: Vec<ManagedProxyFields>,
+}
+
+/// A receipt is retained even when committing, applying or unlocking fails after a possible write.
+#[derive(Debug)]
+pub struct PrivilegedProxyApply {
+    pub receipt: PrivilegedProxyReceipt,
+    pub result: Result<()>,
+}
+
+pub(crate) fn apply_privileged_native_owned(
+    system: &Sysproxy,
+    auto: &Autoproxy,
+) -> Result<PrivilegedProxyApply> {
+    let mut writer = NativeProxyWriter::open()?;
+    writer.set_global(&system.host, system.port, &system.bypass, system.enable);
+    writer.set_pac(&auto.url, auto.enable);
+    // Parse before staging: no fallible receipt construction is allowed after a possible write.
+    let receipt = writer.receipt()?;
+    let commit = writer.commit();
+    let unlock = writer.finish();
+    Ok(PrivilegedProxyApply {
+        receipt,
+        result: commit.and(unlock),
+    })
+}
+
+pub(crate) fn clear_privileged_native_if_unchanged(
+    receipt: &mut PrivilegedProxyReceipt,
+) -> Result<bool> {
+    let mut writer = match NativeProxyWriter::open_service(Some(&receipt.service_id)) {
+        Ok(writer) => writer,
+        Err(Error::NoActiveNetworkService) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let current = managed_proxy_fields(&writer.config.to_immutable())?;
+    writer.set_global("", 0, "", false);
+    writer.set_pac("", false);
+    let disabled = managed_proxy_fields(&writer.config.to_immutable())?;
+    let cleared = clear_owned_fields(receipt, &current, disabled, || writer.commit())?;
+    writer.finish()?;
+    Ok(cleared)
+}
+
+fn clear_owned_fields(
+    receipt: &mut PrivilegedProxyReceipt,
+    current: &ManagedProxyFields,
+    disabled: ManagedProxyFields,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    if !receipt.states.contains(current) {
+        return Ok(false);
+    }
+    // A failed apply can leave Disabled committed but not active. Retain that state too,
+    // so a retry applies our own partial clear instead of mistaking it for a foreign write.
+    if !receipt.states.contains(&disabled) {
+        receipt.states.push(disabled);
+    }
+    commit()?;
+    Ok(true)
 }
 
 /// Fixed path prevents `PATH` substitution in privileged callers.
@@ -1333,4 +1458,85 @@ fn a_successful_write_advances_the_progress_counter() {
         ),
         "unexpected failure shape: {failure:?}"
     );
+}
+
+#[test]
+fn managed_proxy_fields_preserve_raw_bypass_and_absent_values() -> Result<()> {
+    let key = CFString::from_static_string("ExceptionsList");
+    let joined = CFDictionary::from_CFType_pairs(&[(
+        key.clone(),
+        CFArray::from_CFTypes(&[CFString::new("a,b")]).as_CFType(),
+    )]);
+    let split = CFDictionary::from_CFType_pairs(&[(
+        key,
+        CFArray::from_CFTypes(&[CFString::new("a"), CFString::new("b")]).as_CFType(),
+    )]);
+    assert_eq!(
+        parse_bypass_from_dict(&joined)?.join(","),
+        parse_bypass_from_dict(&split)?.join(",")
+    );
+    assert_ne!(
+        managed_proxy_fields(&joined)?,
+        managed_proxy_fields(&split)?
+    );
+    let missing = CFDictionary::<CFString, CFType>::from_CFType_pairs(&[]);
+    let disabled = CFDictionary::from_CFType_pairs(&[(
+        CFString::from_static_string("HTTPEnable"),
+        CFNumber::from(0).as_CFType(),
+    )]);
+    assert_ne!(
+        managed_proxy_fields(&missing)?,
+        managed_proxy_fields(&disabled)?
+    );
+    Ok(())
+}
+
+#[test]
+fn partial_owned_clear_retries_its_committed_disabled_state() -> Result<()> {
+    let enabled = managed_proxy_fields(&CFDictionary::from_CFType_pairs(&[(
+        CFString::from_static_string("HTTPEnable"),
+        CFNumber::from(1).as_CFType(),
+    )]))?;
+    let disabled = managed_proxy_fields(&CFDictionary::from_CFType_pairs(&[(
+        CFString::from_static_string("HTTPEnable"),
+        CFNumber::from(0).as_CFType(),
+    )]))?;
+    let mut receipt = PrivilegedProxyReceipt {
+        service_id: "isolated-fixture".into(),
+        states: vec![enabled.clone()],
+    };
+    let mut committed = enabled.clone();
+    assert!(
+        clear_owned_fields(&mut receipt, &enabled, disabled.clone(), || {
+            committed = disabled.clone();
+            Err(Error::SystemConfiguration(
+                "fixture apply failure after commit",
+            ))
+        })
+        .is_err()
+    );
+    let mut applied = false;
+    assert!(clear_owned_fields(
+        &mut receipt,
+        &committed,
+        disabled.clone(),
+        || {
+            applied = true;
+            Ok(())
+        }
+    )?);
+    assert!(applied);
+    let foreign = managed_proxy_fields(&CFDictionary::<CFString, CFType>::from_CFType_pairs(&[]))?;
+    assert!(!clear_owned_fields(
+        &mut receipt,
+        &foreign,
+        disabled,
+        || {
+            Err(Error::SystemConfiguration(
+                "foreign state must not be written",
+            ))
+        }
+    )?);
+    assert_eq!(receipt.states.len(), 2);
+    Ok(())
 }
