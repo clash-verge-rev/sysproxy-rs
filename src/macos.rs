@@ -552,6 +552,7 @@ pub(crate) fn apply_privileged_native(system: &Sysproxy, auto: &Autoproxy) -> Re
 
 /// Identifies the exact service and proxy fields written by one native operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PrivilegedProxyReceipt {
     service_id: String,
     states: Vec<ManagedProxyFields>,
@@ -567,12 +568,14 @@ pub struct PrivilegedProxyApply {
 pub(crate) fn apply_privileged_native_owned(
     system: &Sysproxy,
     auto: &Autoproxy,
+    before_write: impl FnOnce(&PrivilegedProxyReceipt) -> Result<()>,
 ) -> Result<PrivilegedProxyApply> {
     let mut writer = NativeProxyWriter::open()?;
     writer.set_global(&system.host, system.port, &system.bypass, system.enable);
     writer.set_pac(&auto.url, auto.enable);
     // Parse before staging: no fallible receipt construction is allowed after a possible write.
     let receipt = writer.receipt()?;
+    before_write(&receipt)?;
     let commit = writer.commit();
     let unlock = writer.finish();
     Ok(PrivilegedProxyApply {
@@ -583,6 +586,7 @@ pub(crate) fn apply_privileged_native_owned(
 
 pub(crate) fn clear_privileged_native_if_unchanged(
     receipt: &mut PrivilegedProxyReceipt,
+    before_write: impl FnOnce(&PrivilegedProxyReceipt) -> Result<()>,
 ) -> Result<bool> {
     let mut writer = match NativeProxyWriter::open_service(Some(&receipt.service_id)) {
         Ok(writer) => writer,
@@ -593,7 +597,10 @@ pub(crate) fn clear_privileged_native_if_unchanged(
     writer.set_global("", 0, "", false);
     writer.set_pac("", false);
     let disabled = managed_proxy_fields(&writer.config.to_immutable())?;
-    let cleared = clear_owned_fields(receipt, &current, disabled, || writer.commit())?;
+    let cleared = clear_owned_fields(receipt, &current, disabled, |updated| {
+        before_write(updated)?;
+        writer.commit()
+    })?;
     writer.finish()?;
     Ok(cleared)
 }
@@ -602,7 +609,7 @@ fn clear_owned_fields(
     receipt: &mut PrivilegedProxyReceipt,
     current: &ManagedProxyFields,
     disabled: ManagedProxyFields,
-    commit: impl FnOnce() -> Result<()>,
+    commit: impl FnOnce(&PrivilegedProxyReceipt) -> Result<()>,
 ) -> Result<bool> {
     if !receipt.states.contains(current) {
         return Ok(false);
@@ -612,7 +619,7 @@ fn clear_owned_fields(
     if !receipt.states.contains(&disabled) {
         receipt.states.push(disabled);
     }
-    commit()?;
+    commit(receipt)?;
     Ok(true)
 }
 
@@ -1507,7 +1514,7 @@ fn partial_owned_clear_retries_its_committed_disabled_state() -> Result<()> {
     };
     let mut committed = enabled.clone();
     assert!(
-        clear_owned_fields(&mut receipt, &enabled, disabled.clone(), || {
+        clear_owned_fields(&mut receipt, &enabled, disabled.clone(), |_| {
             committed = disabled.clone();
             Err(Error::SystemConfiguration(
                 "fixture apply failure after commit",
@@ -1520,7 +1527,8 @@ fn partial_owned_clear_retries_its_committed_disabled_state() -> Result<()> {
         &mut receipt,
         &committed,
         disabled.clone(),
-        || {
+        |updated| {
+            assert_eq!(updated.states.len(), 2);
             applied = true;
             Ok(())
         }
@@ -1531,7 +1539,7 @@ fn partial_owned_clear_retries_its_committed_disabled_state() -> Result<()> {
         &mut receipt,
         &foreign,
         disabled,
-        || {
+        |_| {
             Err(Error::SystemConfiguration(
                 "foreign state must not be written",
             ))
