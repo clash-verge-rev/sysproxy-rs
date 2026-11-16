@@ -8,7 +8,7 @@ mod macos;
 mod windows;
 
 #[cfg(target_os = "macos")]
-pub use macos::NetworkServiceMonitor;
+pub use macos::{NetworkServiceMonitor, PrivilegedProxyApply, PrivilegedProxyReceipt};
 
 #[cfg(feature = "iptools")]
 pub mod utils;
@@ -40,6 +40,30 @@ pub struct Autoproxy {
 #[cfg(target_os = "macos")]
 pub fn apply_privileged_native(system: &Sysproxy, auto: &Autoproxy) -> Result<()> {
     macos::apply_privileged_native(system, auto)
+}
+
+/// Applies proxy fields while retaining cleanup identity on every post-write failure.
+/// The callback runs under the preferences lock, before any write, allowing durable receipt storage.
+/// An outer error means no write was attempted. Inspect the returned `result` before reporting success.
+#[cfg(target_os = "macos")]
+pub fn apply_privileged_native_owned(
+    system: &Sysproxy,
+    auto: &Autoproxy,
+    before_write: impl FnOnce(&PrivilegedProxyReceipt) -> Result<()>,
+) -> Result<PrivilegedProxyApply> {
+    macos::apply_privileged_native_owned(system, auto, before_write)
+}
+
+/// Clears only the receipt's service, only if its managed proxy fields still match, under one lock.
+/// The callback must persist the updated receipt before a possible partial clear.
+/// On failure, keep the mutated receipt: it also identifies this clear's possible partial commit.
+/// `false` means the service disappeared or a foreign write superseded the receipt.
+#[cfg(target_os = "macos")]
+pub fn clear_privileged_native_if_unchanged(
+    receipt: &mut PrivilegedProxyReceipt,
+    before_write: impl FnOnce(&PrivilegedProxyReceipt) -> Result<()>,
+) -> Result<bool> {
+    macos::clear_privileged_native_if_unchanged(receipt, before_write)
 }
 
 /// Unflattened system proxy state, one entry per protocol.

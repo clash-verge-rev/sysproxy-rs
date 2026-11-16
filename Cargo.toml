@@ -1,6 +1,6 @@
 [package]
 name = "sysproxy"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 authors = ["zzzgydi"]
 license = "MIT"
@@ -12,6 +12,7 @@ description = "A library for set/get system proxy. Supports Windows, macOS and l
 [dependencies]
 log = "0.4"
 thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
 iptools = { version = "0.4", optional = true }
 tokio = { version = "1", features = [
     "rt-multi-thread",
