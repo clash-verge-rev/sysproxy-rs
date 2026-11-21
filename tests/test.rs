@@ -46,6 +46,19 @@ mod tests {
         sysproxy.set_system_proxy().unwrap();
 
         let current = Sysproxy::get_system_proxy().unwrap();
+
+        // Windows 关闭代理时会清空 ProxyServer，读取回来的 host/port 为空；其他平台仍保留原值
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            current,
+            Sysproxy {
+                enable: false,
+                host: String::new(),
+                port: 0,
+                bypass: sysproxy.bypass.clone(),
+            }
+        );
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(current, sysproxy);
     }
 
